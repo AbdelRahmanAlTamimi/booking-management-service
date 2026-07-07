@@ -1,0 +1,18 @@
+# .NET
+bin/
+obj/
+*.user
+
+# SQLite database (created on startup)
+*.db
+*.db-wal
+*.db-shm
+
+# Node / frontend
+node_modules/
+frontend/dist/
+
+# IDE / OS
+.vs/
+.idea/
+.DS_Store
