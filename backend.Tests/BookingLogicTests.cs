@@ -37,21 +37,29 @@ public class BookingLogicTests
         Assert.True(BookingLogic.HasConflict(At(10), At(12), existing));
     }
 
-    // 3 · A booking starting exactly when another ends succeeds (boundaries are exclusive).
+    // 3 · A booking starting exactly when another ends is rejected (boundaries are inclusive).
     [Fact]
-    public void BoundaryTouch_IsNotConflict()
+    public void BoundaryTouch_IsConflict()
     {
         var existing = new[] { Active(At(9), At(10)) };
-        // Existing ends at 10:00, new starts at 10:00 — allowed.
-        Assert.False(BookingLogic.HasConflict(At(10), At(11), existing));
+        // Existing ends at 10:00, new starts at 10:00 — blocked.
+        Assert.True(BookingLogic.HasConflict(At(10), At(11), existing));
     }
 
-    // 3b · The mirror boundary: new ends exactly when existing starts — also allowed.
+    // 3b · The mirror boundary: new ends exactly when existing starts — also blocked.
     [Fact]
-    public void BoundaryTouch_Before_IsNotConflict()
+    public void BoundaryTouch_Before_IsConflict()
     {
         var existing = new[] { Active(At(10), At(11)) };
-        Assert.False(BookingLogic.HasConflict(At(9), At(10), existing));
+        Assert.True(BookingLogic.HasConflict(At(9), At(10), existing));
+    }
+
+    // 3c · One minute past the boundary is free: existing ends at 10:00, new starts at 10:01.
+    [Fact]
+    public void OneMinuteAfterBoundary_IsNotConflict()
+    {
+        var existing = new[] { Active(At(9), At(10)) };
+        Assert.False(BookingLogic.HasConflict(At(10, 1), At(11), existing));
     }
 
     // 4 · Cancelled bookings do not block a new booking.
