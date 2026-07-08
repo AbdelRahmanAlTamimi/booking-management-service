@@ -31,39 +31,27 @@ API end to end.
 
 ## Design Write-up
 
-**A. How overlap is defined and enforced, and why.** Bookings are **half-open intervals `[start, end)`**
-— the conventional model, where back-to-back bookings don't overlap — plus an explicit **turnover buffer**
-(`MinimumGap`, 1 minute). Two windows conflict unless separated by at least the buffer:
-`NewStart < ExistingEnd + buffer && NewEnd + buffer > ExistingStart`. So a booking ending at `10:00`
-frees the resource at `10:01`, not before. Modelling the gap as a real parameter (rather than
-faking it with inclusive boundaries) keeps the semantics honest — with `buffer = 0` it degrades to plain
-half-open overlap — and makes the buffer a product knob, not a hidden side effect. The rule is a pure,
-unit-tested method ([`BookingLogic`](backend/Services/BookingLogic.cs)); `POST /bookings` loads the
-resource's **active** bookings (cancelled ones excluded), validates `End > Start`, and coerces times to UTC.
+**A. Overlap.** Half-open intervals `[start, end)` plus an explicit turnover buffer (`MinimumGap`, 1 min):
+two windows conflict unless separated by the buffer — `NewStart < ExistingEnd + buffer && NewEnd + buffer > ExistingStart`.
+So a booking ending at `10:00` frees the resource at `10:01`. Making the gap a real parameter (`buffer = 0`
+degrades to plain half-open overlap) keeps it a product knob, not a hidden side effect. The rule is a pure,
+unit-tested method ([`BookingLogic`](backend/Services/BookingLogic.cs)).
 
-**B. Concurrency assumptions.** The service runs as a **single instance** on one SQLite file. Two
-races are handled. (1) *Concurrent inserts of the same slot* — the extension task. The check-then-insert
-is wrapped in a **per-resource lock** ([`ResourceLocks`](backend/Services/ResourceLocks.cs),
-[`BookingService`](backend/Services/BookingService.cs)), so two simultaneous creates for one resource are
-serialized: the second reads the first's committed booking and gets `409` (see
-[`ConcurrentBookingTests`](backend.Tests/ConcurrentBookingTests.cs)). Locks are keyed by `ResourceId`, so
-different resources never contend. (2) *Lost updates on the same row* — a `RowVersion` optimistic token
-makes a stale write affect 0 rows and throw `DbUpdateConcurrencyException` → `409` (see
-[`ConcurrencyTests`](backend.Tests/ConcurrencyTests.cs)). The lock is **in-process**, so it only holds for
-one instance; the multi-instance fix is a DB-level exclusion constraint (D).
+**B. Concurrency.** Single instance, one SQLite file. Two races handled: (1) concurrent same-slot inserts —
+check-then-insert wrapped in a **per-resource lock** ([`BookingService`](backend/Services/BookingService.cs)),
+so the second create sees the first and gets `409` ([`ConcurrentBookingTests`](backend.Tests/ConcurrentBookingTests.cs));
+(2) lost updates on a row — a `RowVersion` token throws `DbUpdateConcurrencyException` → `409`
+([`ConcurrencyTests`](backend.Tests/ConcurrencyTests.cs)). The lock is in-process; multi-instance needs the DB fix (D).
 
-**C. What breaks at scale, first bottleneck.** The **single SQLite writer** — all writes serialise
-through one file. And the per-resource lock is **in-process**: run two API instances and each has its own
-lock table, so the insert race reopens across instances. Both point to the same fix (D).
+**C. At scale.** The **single SQLite writer** serialises all writes, and the per-resource lock is in-process,
+so the insert race reopens across instances. Both point to D.
 
-**D. Evolving into a distributed system.** Move to **PostgreSQL** and push overlap into the DB as an
-**exclusion constraint** over a `tstzrange` (`EXCLUDE USING gist (resource_id WITH =, period WITH &&)`),
-eliminating the insert race atomically. Then scale the **stateless API horizontally**, and add read
-replicas / caching for the read-heavy `GET /bookings`.
+**D. Distributed.** Move to **PostgreSQL** with a `tstzrange` **exclusion constraint**
+(`EXCLUDE USING gist (resource_id WITH =, period WITH &&)`) to reject overlaps atomically, then scale the
+stateless API horizontally with read replicas for `GET /bookings`.
 
-**E. Tradeoff prioritized.** **Simplicity and correctness** over performance: the overlap rule is
-isolated and unit-tested, and the app is a single monolith with no infrastructure to stand up. Where
-the two collided (SQLite dropping timezone info) I chose correctness. Throughput is deferred to C/D.
+**E. Tradeoff.** **Simplicity and correctness** over performance — isolated, unit-tested overlap rule; single
+monolith, no infra. Where they collided (SQLite dropping timezone info) I chose correctness. Throughput deferred to C/D.
 
 ---
 
