@@ -19,13 +19,17 @@ public class BookingLogicTests
         return b;
     }
 
+    // Conflict check with the app's default turnover buffer (1 minute).
+    private static bool Conflict(DateTime start, DateTime end, Booking[] existing) =>
+        BookingLogic.HasConflict(start, end, existing, BookingLogic.MinimumGap);
+
     // 1 · A valid (non-overlapping) booking succeeds.
     [Fact]
     public void ValidBooking_NoConflict()
     {
         var existing = new[] { Active(At(9), At(10)) };
         // New booking 11:00–12:00 is well clear of 09:00–10:00.
-        Assert.False(BookingLogic.HasConflict(At(11), At(12), existing));
+        Assert.False(Conflict(At(11), At(12), existing));
     }
 
     // 2 · An overlapping booking is rejected.
@@ -34,16 +38,16 @@ public class BookingLogicTests
     {
         var existing = new[] { Active(At(9), At(11)) };
         // 10:00–12:00 overlaps 09:00–11:00 (from 10:00 to 11:00).
-        Assert.True(BookingLogic.HasConflict(At(10), At(12), existing));
+        Assert.True(Conflict(At(10), At(12), existing));
     }
 
-    // 3 · A booking starting exactly when another ends is rejected (boundaries are inclusive).
+    // 3 · A booking starting exactly when another ends is rejected — the 1-minute buffer isn't met.
     [Fact]
     public void BoundaryTouch_IsConflict()
     {
         var existing = new[] { Active(At(9), At(10)) };
-        // Existing ends at 10:00, new starts at 10:00 — blocked.
-        Assert.True(BookingLogic.HasConflict(At(10), At(11), existing));
+        // Existing ends at 10:00, new starts at 10:00 — no gap, blocked.
+        Assert.True(Conflict(At(10), At(11), existing));
     }
 
     // 3b · The mirror boundary: new ends exactly when existing starts — also blocked.
@@ -51,15 +55,32 @@ public class BookingLogicTests
     public void BoundaryTouch_Before_IsConflict()
     {
         var existing = new[] { Active(At(10), At(11)) };
-        Assert.True(BookingLogic.HasConflict(At(9), At(10), existing));
+        Assert.True(Conflict(At(9), At(10), existing));
     }
 
-    // 3c · One minute past the boundary is free: existing ends at 10:00, new starts at 10:01.
+    // 3c · A gap shorter than the buffer still conflicts: existing ends 10:00, new starts 10:00:30.
+    [Fact]
+    public void SubBufferGap_IsConflict()
+    {
+        var existing = new[] { Active(At(9), At(10)) };
+        var thirtySecondsPast = new DateTime(2026, 1, 1, 10, 0, 30, DateTimeKind.Utc);
+        Assert.True(Conflict(thirtySecondsPast, At(11), existing));
+    }
+
+    // 3d · Exactly one minute past the boundary meets the buffer and is free.
     [Fact]
     public void OneMinuteAfterBoundary_IsNotConflict()
     {
         var existing = new[] { Active(At(9), At(10)) };
-        Assert.False(BookingLogic.HasConflict(At(10, 1), At(11), existing));
+        Assert.False(Conflict(At(10, 1), At(11), existing));
+    }
+
+    // 3e · With a zero buffer the rule is plain half-open overlap: back-to-back bookings are allowed.
+    [Fact]
+    public void ZeroBuffer_BackToBack_IsAllowed()
+    {
+        var existing = new[] { Active(At(9), At(10)) };
+        Assert.False(BookingLogic.HasConflict(At(10), At(11), existing, TimeSpan.Zero));
     }
 
     // 4 · Cancelled bookings do not block a new booking.
@@ -68,7 +89,7 @@ public class BookingLogicTests
     {
         var existing = new[] { Cancelled(At(9), At(12)) };
         // Same window as a cancelled booking — should be free.
-        Assert.False(BookingLogic.HasConflict(At(9), At(12), existing));
+        Assert.False(Conflict(At(9), At(12), existing));
     }
 
     // Extra · An identical window to an active booking is rejected.
@@ -76,7 +97,7 @@ public class BookingLogicTests
     public void IdenticalWindow_IsConflict()
     {
         var existing = new[] { Active(At(9), At(10)) };
-        Assert.True(BookingLogic.HasConflict(At(9), At(10), existing));
+        Assert.True(Conflict(At(9), At(10), existing));
     }
 
     // Extra · A new booking fully contained inside an existing one is rejected.
@@ -84,7 +105,7 @@ public class BookingLogicTests
     public void ContainedWindow_IsConflict()
     {
         var existing = new[] { Active(At(9), At(12)) };
-        Assert.True(BookingLogic.HasConflict(At(10), At(11), existing));
+        Assert.True(Conflict(At(10), At(11), existing));
     }
 
     // Extra · A new booking that fully contains an existing one is rejected.
@@ -92,7 +113,7 @@ public class BookingLogicTests
     public void EnclosingWindow_IsConflict()
     {
         var existing = new[] { Active(At(10), At(11)) };
-        Assert.True(BookingLogic.HasConflict(At(9), At(12), existing));
+        Assert.True(Conflict(At(9), At(12), existing));
     }
 
     // Extra · Overlap is evaluated against ALL active bookings, not just the first.
@@ -100,7 +121,7 @@ public class BookingLogicTests
     public void ConflictWithSecondBooking_IsDetected()
     {
         var existing = new[] { Active(At(8), At(9)), Active(At(13), At(14)) };
-        Assert.True(BookingLogic.HasConflict(At(13, 30), At(15), existing));
+        Assert.True(Conflict(At(13, 30), At(15), existing));
     }
 
     // --- Window validation ---

@@ -9,6 +9,11 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlite(builder.Configuration.GetConnectionString("Default") ?? "Data Source=bookings.db"));
 
+// Per-resource locks are process-wide, so the guard must be a singleton. BookingService is scoped
+// (it depends on the scoped DbContext).
+builder.Services.AddSingleton<ResourceLocks>();
+builder.Services.AddScoped<BookingService>();
+
 const string CorsPolicy = "frontend";
 builder.Services.AddCors(options =>
     options.AddPolicy(CorsPolicy, p => p.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
@@ -38,51 +43,21 @@ app.MapGet("/users", async (AppDbContext db) =>
 
 // --- Bookings ---
 
-// Create a booking (with overlap + concurrency guards).
-app.MapPost("/bookings", async (CreateBookingRequest req, AppDbContext db) =>
+// Create a booking. The overlap + concurrency guards live in BookingService.
+app.MapPost("/bookings", async (CreateBookingRequest req, BookingService bookings, AppDbContext db) =>
 {
-    var start = BookingLogic.AsUtc(req.StartDateTime);
-    var end = BookingLogic.AsUtc(req.EndDateTime);
-
-    var windowError = BookingLogic.ValidateWindow(start, end);
-    if (windowError is not null)
-        return Results.BadRequest(new { error = windowError });
-
-    if (!await db.Resources.AnyAsync(r => r.Id == req.ResourceId))
-        return Results.BadRequest(new { error = "Unknown ResourceId." });
-    if (!await db.Users.AnyAsync(u => u.Id == req.UserId))
-        return Results.BadRequest(new { error = "Unknown UserId." });
-
-    // Overlap check against ACTIVE bookings for this resource only.
-    var active = await db.Bookings
-        .Where(x => x.ResourceId == req.ResourceId && !x.IsCancelled)
-        .ToListAsync();
-
-    if (BookingLogic.HasConflict(start, end, active))
-        return Results.Conflict(new { error = "The resource is already booked for an overlapping time window." });
-
-    var booking = new Booking
+    var result = await bookings.CreateAsync(req);
+    return result.Status switch
     {
-        Id = Guid.NewGuid(),
-        ResourceId = req.ResourceId,
-        UserId = req.UserId,
-        StartDateTime = start,
-        EndDateTime = end,
-        IsCancelled = false,
+        CreateBookingStatus.Created =>
+            Results.Created($"/bookings/{result.Booking!.Id}", await ToResponse(db, result.Booking.Id)),
+        CreateBookingStatus.InvalidWindow =>
+            Results.BadRequest(new { error = result.Error }),
+        CreateBookingStatus.UnknownResource or CreateBookingStatus.UnknownUser =>
+            Results.NotFound(new { error = result.Error }),
+        _ => // Overlap or ConcurrencyConflict
+            Results.Conflict(new { error = result.Error }),
     };
-    db.Bookings.Add(booking);
-
-    try
-    {
-        await db.SaveChangesAsync();
-    }
-    catch (DbUpdateConcurrencyException)
-    {
-        // A concurrent writer changed the row between our read and write — treat as a conflict.
-        return Results.Conflict(new { error = "Concurrent modification detected. Please retry." });
-    }
-
-    return Results.Created($"/bookings/{booking.Id}", await ToResponse(db, booking.Id));
 });
 
 // List active bookings for a resource, with optional date-range filter.

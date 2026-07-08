@@ -11,14 +11,18 @@ API end to end.
 
 ## Decisions & Assumptions
 
-- **Overlap = closed intervals `[start, end]`.** A booking ending at `10:00` blocks another
-  starting at `10:00`; the slot is free from `10:01`. See write-up A.
+- **Overlap = half-open intervals `[start, end)` + a 1-minute turnover buffer.** A booking ending at
+  `10:00` frees the resource at `10:01`, not before; the buffer is an explicit `MinimumGap` constant
+  (set it to zero for conventional back-to-back bookings). See write-up A.
 - **Soft delete.** Cancelling sets `IsCancelled = true`; cancelled bookings are excluded from
   retrieval and overlap checks, but the row is kept for history.
 - **UTC everywhere.** SQLite has no timezone-aware type, so a value converter forces read/write as
   UTC and the API always emits a trailing `Z`. The frontend converts local inputs to UTC before sending.
+- **Concurrent same-slot creates guarded by a per-resource in-process lock.** Serializes the
+  check-then-insert so two simultaneous bookings for one resource can't both win; keyed by `ResourceId`.
 - **Concurrency token stamped in `SaveChanges`.** SQLite has no native `rowversion`, so the token is
-  set in an override — provider-independent and reliably triggers `DbUpdateConcurrencyException`.
+  set in an override — provider-independent and reliably triggers `DbUpdateConcurrencyException` on
+  same-row lost updates (e.g. two cancels).
 - **`EnsureCreated` + seed, no migrations.** Keeps clean-checkout startup to a single `dotnet run`
   (seeds 3 users + 3 resources). A real deployment would use EF migrations.
 - **Ids are `Guid`; CORS is open** (`AllowAnyOrigin`) for local development.
@@ -27,23 +31,30 @@ API end to end.
 
 ## Design Write-up
 
-**A. How overlap is defined and enforced, and why.** Bookings are **closed intervals `[start, end]`**;
-two windows overlap iff `NewStart <= ExistingEnd && NewEnd >= ExistingStart`. Touching boundaries
-count as a conflict — a booking ending at `10:00` blocks one starting at `10:00`, leaving the resource
-free from `10:01`. The rule is a pure, unit-tested method
-([`BookingLogic`](backend/Services/BookingLogic.cs)); `POST /bookings` loads the resource's **active**
-bookings (cancelled ones excluded), validates `End > Start`, and coerces times to UTC.
+**A. How overlap is defined and enforced, and why.** Bookings are **half-open intervals `[start, end)`**
+— the conventional model, where back-to-back bookings don't overlap — plus an explicit **turnover buffer**
+(`MinimumGap`, 1 minute). Two windows conflict unless separated by at least the buffer:
+`NewStart < ExistingEnd + buffer && NewEnd + buffer > ExistingStart`. So a booking ending at `10:00`
+frees the resource at `10:01`, not before. Modelling the gap as a real parameter (rather than
+faking it with inclusive boundaries) keeps the semantics honest — with `buffer = 0` it degrades to plain
+half-open overlap — and makes the buffer a product knob, not a hidden side effect. The rule is a pure,
+unit-tested method ([`BookingLogic`](backend/Services/BookingLogic.cs)); `POST /bookings` loads the
+resource's **active** bookings (cancelled ones excluded), validates `End > Start`, and coerces times to UTC.
 
-**B. Concurrency assumptions.** The service runs as a **single instance** on one SQLite file (one
-writer at a time). The check-then-insert on `POST` is not atomic. For the extension task the `Booking`
-row carries a `RowVersion` token; both write endpoints catch `DbUpdateConcurrencyException` and return
-`409`, protecting against lost updates on the **same** row (see
-[`ConcurrencyTests`](backend.Tests/ConcurrencyTests.cs)). Limitation: a per-row token does not stop two
-concurrent *inserts* of overlapping bookings — narrowed today by SQLite's single writer, fixed properly at the DB level (D).
+**B. Concurrency assumptions.** The service runs as a **single instance** on one SQLite file. Two
+races are handled. (1) *Concurrent inserts of the same slot* — the extension task. The check-then-insert
+is wrapped in a **per-resource lock** ([`ResourceLocks`](backend/Services/ResourceLocks.cs),
+[`BookingService`](backend/Services/BookingService.cs)), so two simultaneous creates for one resource are
+serialized: the second reads the first's committed booking and gets `409` (see
+[`ConcurrentBookingTests`](backend.Tests/ConcurrentBookingTests.cs)). Locks are keyed by `ResourceId`, so
+different resources never contend. (2) *Lost updates on the same row* — a `RowVersion` optimistic token
+makes a stale write affect 0 rows and throw `DbUpdateConcurrencyException` → `409` (see
+[`ConcurrencyTests`](backend.Tests/ConcurrencyTests.cs)). The lock is **in-process**, so it only holds for
+one instance; the multi-instance fix is a DB-level exclusion constraint (D).
 
 **C. What breaks at scale, first bottleneck.** The **single SQLite writer** — all writes serialise
-through one file. Secondarily, the **read-then-check** pattern costs a query per create and reopens the
-insert race across processes.
+through one file. And the per-resource lock is **in-process**: run two API instances and each has its own
+lock table, so the insert race reopens across instances. Both point to the same fix (D).
 
 **D. Evolving into a distributed system.** Move to **PostgreSQL** and push overlap into the DB as an
 **exclusion constraint** over a `tstzrange` (`EXCLUDE USING gist (resource_id WITH =, period WITH &&)`),
@@ -73,7 +84,7 @@ All times are UTC ISO-8601 (e.g. `2026-02-01T09:00:00Z`).
 | Method | Route | Description |
 | --- | --- | --- |
 | `GET` | `/resources`, `/users` | List resources / users (for dropdowns). |
-| `POST` | `/bookings` | Create a booking. `201`, or `400` (bad window / unknown ref), or `409` (overlap or concurrent write). |
+| `POST` | `/bookings` | Create a booking. `201`, `400` (bad window), `404` (unknown resource/user), or `409` (overlap or concurrent write). |
 | `GET` | `/bookings?resourceId={id}&from={utc}&to={utc}` | List **active** bookings for a resource; optional range (intersects `[from, to)`), sorted by start time. |
 | `DELETE` | `/bookings/{id}` | Cancel (soft delete). `204` (idempotent) or `404`. |
 

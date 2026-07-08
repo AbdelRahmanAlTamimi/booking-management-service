@@ -9,21 +9,30 @@ namespace BookingApi.Services;
 public static class BookingLogic
 {
     /// <summary>
-    /// Two closed intervals [start, end] overlap iff newStart &lt;= existingEnd AND newEnd &gt;= existingStart.
-    /// Because the intervals are closed, touching boundaries DO overlap:
-    /// a booking ending at 10:00 blocks another starting at 10:00 — the resource
-    /// becomes available for the next reservation at 10:01.
+    /// Minimum gap required between two bookings for the same resource — a turnover buffer.
+    /// A booking ending at 10:00 frees the resource at 10:01, not at 10:00. This is a product
+    /// decision, kept explicit here; set it to <see cref="TimeSpan.Zero"/> to allow back-to-back
+    /// bookings (the conventional half-open behaviour).
     /// </summary>
-    public static bool Overlaps(DateTime newStart, DateTime newEnd, DateTime existingStart, DateTime existingEnd)
-        => newStart <= existingEnd && newEnd >= existingStart;
+    public static readonly TimeSpan MinimumGap = TimeSpan.FromMinutes(1);
 
     /// <summary>
-    /// Returns true if the proposed window collides with any ACTIVE existing booking
-    /// for the same resource. Cancelled bookings are ignored.
+    /// Bookings are half-open intervals [start, end). Two of them conflict unless they are separated
+    /// by at least <paramref name="buffer"/>: i.e. iff newStart &lt; existingEnd + buffer AND
+    /// newEnd + buffer &gt; existingStart. With buffer = zero this is plain interval overlap, so a
+    /// booking ending at 10:00 and one starting at 10:00 do NOT conflict; with the default 1-minute
+    /// buffer, the next booking may start at 10:01.
     /// </summary>
-    public static bool HasConflict(DateTime newStart, DateTime newEnd, IEnumerable<Booking> existingForResource)
+    public static bool Overlaps(DateTime newStart, DateTime newEnd, DateTime existingStart, DateTime existingEnd, TimeSpan buffer)
+        => newStart < existingEnd + buffer && newEnd + buffer > existingStart;
+
+    /// <summary>
+    /// Returns true if the proposed window collides with any ACTIVE existing booking for the same
+    /// resource, respecting the required <paramref name="buffer"/>. Cancelled bookings are ignored.
+    /// </summary>
+    public static bool HasConflict(DateTime newStart, DateTime newEnd, IEnumerable<Booking> existingForResource, TimeSpan buffer)
         => existingForResource.Any(b =>
-            !b.IsCancelled && Overlaps(newStart, newEnd, b.StartDateTime, b.EndDateTime));
+            !b.IsCancelled && Overlaps(newStart, newEnd, b.StartDateTime, b.EndDateTime, buffer));
 
     /// <summary>
     /// Validates the window itself (independent of other bookings).
