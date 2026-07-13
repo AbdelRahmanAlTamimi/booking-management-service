@@ -41,6 +41,7 @@ public class ConcurrencyTests : IDisposable
     [Fact]
     public void ConcurrentCancel_SecondWriterThrows()
     {
+        // Arrange — two contexts each load the same booking.
         var id = new AppDbContext(_options).Bookings.Single().Id;
 
         using var ctx1 = new AppDbContext(_options);
@@ -49,11 +50,12 @@ public class ConcurrencyTests : IDisposable
         var b1 = ctx1.Bookings.Single(x => x.Id == id);
         var b2 = ctx2.Bookings.Single(x => x.Id == id);
 
-        // First writer wins.
+        // Act — first writer wins.
         b1.IsCancelled = true;
         ctx1.SaveChanges();
 
-        // Second writer loaded the same original RowVersion — its UPDATE affects 0 rows and throws.
+        // Assert — second writer loaded the same original RowVersion, so its
+        // UPDATE affects 0 rows and throws.
         b2.IsCancelled = true;
         Assert.Throws<DbUpdateConcurrencyException>(() => ctx2.SaveChanges());
     }
@@ -61,17 +63,19 @@ public class ConcurrencyTests : IDisposable
     [Fact]
     public void Cancel_ThenRebook_SameWindowIsFree()
     {
+        // Arrange
         var id = new AppDbContext(_options).Bookings.Single().Id;
 
+        // Act — cancel the only booking for RoomA.
         using (var ctx = new AppDbContext(_options))
         {
             ctx.Bookings.Single(x => x.Id == id).IsCancelled = true;
             ctx.SaveChanges();
         }
 
+        // Assert — no active bookings remain, so the window is free.
         using (var ctx = new AppDbContext(_options))
         {
-            // The only booking for RoomA is now cancelled, so no active bookings remain.
             var active = ctx.Bookings.Count(b => b.ResourceId == AppDbContext.Seed.RoomA && !b.IsCancelled);
             Assert.Equal(0, active);
         }

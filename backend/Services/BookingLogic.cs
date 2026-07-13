@@ -9,10 +9,10 @@ namespace BookingApi.Services;
 public static class BookingLogic
 {
     /// <summary>
-    /// Minimum gap required between two bookings for the same resource — a turnover buffer.
-    /// A booking ending at 10:00 frees the resource at 10:01, not at 10:00. This is a product
-    /// decision, kept explicit here; set it to <see cref="TimeSpan.Zero"/> to allow back-to-back
-    /// bookings (the conventional half-open behaviour).
+    /// Minimum gap required between two DIFFERENT users' bookings for the same resource — a turnover
+    /// buffer. A booking ending at 10:00 frees the resource for another user at 10:01, not at 10:00.
+    /// This is a mandatory product rule: it is never zero for a foreign booking. The same user may
+    /// book back-to-back against their own bookings (see <see cref="HasConflict"/>).
     /// </summary>
     public static readonly TimeSpan MinimumGap = TimeSpan.FromMinutes(1);
 
@@ -28,11 +28,15 @@ public static class BookingLogic
 
     /// <summary>
     /// Returns true if the proposed window collides with any ACTIVE existing booking for the same
-    /// resource, respecting the required <paramref name="buffer"/>. Cancelled bookings are ignored.
+    /// resource. The mandatory turnover <paramref name="buffer"/> is enforced against OTHER users'
+    /// bookings; a booking owned by <paramref name="newUserId"/> uses a zero buffer, so a user may
+    /// book back-to-back against their own booking (genuine overlap is still rejected). Cancelled
+    /// bookings are ignored.
     /// </summary>
-    public static bool HasConflict(DateTime newStart, DateTime newEnd, IEnumerable<Booking> existingForResource, TimeSpan buffer)
+    public static bool HasConflict(DateTime newStart, DateTime newEnd, Guid newUserId, IEnumerable<Booking> existingForResource, TimeSpan buffer)
         => existingForResource.Any(b =>
-            !b.IsCancelled && Overlaps(newStart, newEnd, b.StartDateTime, b.EndDateTime, buffer));
+            !b.IsCancelled &&
+            Overlaps(newStart, newEnd, b.StartDateTime, b.EndDateTime, b.UserId == newUserId ? TimeSpan.Zero : buffer));
 
     /// <summary>
     /// Validates the window itself (independent of other bookings).

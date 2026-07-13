@@ -36,22 +36,23 @@ public class ConcurrentBookingTests : IDisposable
     [Fact]
     public async Task ConcurrentCreate_SameSlot_OnlyOneSucceeds()
     {
+        // Arrange — two independent contexts + services (two "requests"), one shared lock registry.
         var locks = new ResourceLocks();
         var req = new CreateBookingRequest(AppDbContext.Seed.RoomB, AppDbContext.Seed.Alice, Start, End);
 
-        // Two independent contexts + services (two "requests"), one shared lock registry.
         using var ctx1 = new AppDbContext(_options);
         using var ctx2 = new AppDbContext(_options);
         var svc1 = new BookingService(ctx1, locks);
         var svc2 = new BookingService(ctx2, locks);
 
-        // Fire both at once.
+        // Act — fire both at once.
         var results = await Task.WhenAll(svc1.CreateAsync(req), svc2.CreateAsync(req));
 
+        // Assert — exactly one succeeds, one overlaps...
         Assert.Equal(1, results.Count(r => r.Status == CreateBookingStatus.Created));
         Assert.Equal(1, results.Count(r => r.Status == CreateBookingStatus.Overlap));
 
-        // And the DB holds exactly one active booking for the slot.
+        // ...and the DB holds exactly one active booking for the slot.
         using var verify = new AppDbContext(_options);
         Assert.Equal(1, verify.Bookings.Count(b => b.ResourceId == AppDbContext.Seed.RoomB && !b.IsCancelled));
     }
@@ -59,6 +60,7 @@ public class ConcurrentBookingTests : IDisposable
     [Fact]
     public async Task ConcurrentCreate_DifferentResources_BothSucceed()
     {
+        // Arrange — two requests for two different resources, one shared lock registry.
         var locks = new ResourceLocks();
         var reqA = new CreateBookingRequest(AppDbContext.Seed.RoomA, AppDbContext.Seed.Alice, Start, End);
         var reqB = new CreateBookingRequest(AppDbContext.Seed.RoomB, AppDbContext.Seed.Bob, Start, End);
@@ -68,9 +70,10 @@ public class ConcurrentBookingTests : IDisposable
         var svc1 = new BookingService(ctx1, locks);
         var svc2 = new BookingService(ctx2, locks);
 
+        // Act — fire both at once.
         var results = await Task.WhenAll(svc1.CreateAsync(reqA), svc2.CreateAsync(reqB));
 
-        // Different resources never contend, so both go through.
+        // Assert — different resources never contend, so both go through.
         Assert.All(results, r => Assert.Equal(CreateBookingStatus.Created, r.Status));
     }
 

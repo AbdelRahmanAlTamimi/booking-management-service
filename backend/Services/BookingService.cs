@@ -45,7 +45,7 @@ public sealed class BookingService(AppDbContext db, ResourceLocks locks)
                 .Where(x => x.ResourceId == req.ResourceId && !x.IsCancelled)
                 .ToListAsync(ct);
 
-            if (BookingLogic.HasConflict(start, end, active, BookingLogic.MinimumGap))
+            if (BookingLogic.HasConflict(start, end, req.UserId, active, BookingLogic.MinimumGap))
                 return new(CreateBookingStatus.Overlap, Error: "The resource is already booked for an overlapping time window.");
 
             var booking = new Booking
